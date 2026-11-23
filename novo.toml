@@ -1,0 +1,32 @@
+[package]
+name        = "http-digest-nv"
+version     = "0.1.0"
+description = "HTTP digest access authentication, RFC 7616: reads a WWW-Authenticate challenge and computes the Authorization header that answers it, with MD5 and SHA-256, their -sess forms, qop auth and auth-int, and the RFC 2069 form a server without qop expects.  The client nonce and the request counter are parameters, so the computation is arithmetic over bytes."
+license     = "Apache-2.0"
+
+# `experimental` because no program outside this repository has used the
+# package yet.
+stability   = "experimental"
+
+# `core`: a challenge is parsed from text and a header is built from
+# text.  The random client nonce and the request counter arrive as
+# parameters, and the request is sent by the caller's HTTP client.
+layer       = "core"
+
+category    = "web"
+
+tags        = ["http", "digest", "authentication", "rfc-7616", "rfc-2617", "rfc-2069", "md5", "sha-256", "www-authenticate"]
+repository  = "https://github.com/novolang/http-digest-nv"
+maintainers = ["novo-lang"]
+novo        = ">= 0.26.1"
+
+# A library: no `main`, so `novo pkg build` type-checks and
+# effect-checks every module under `src/` and writes no binary.
+
+[docs.pages]
+"README.md" = "Answering an HTTP digest authentication challenge"
+
+[dependencies]
+# crypto-nv supplies MD5 and SHA-256, the two hashes RFC 7616 names that
+# this package implements.  `core`, so the layer rule holds.
+crypto-nv = "^0.1"

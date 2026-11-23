@@ -1,0 +1,130 @@
+// digest_edge_tests — the reader of a challenge: its grammar, its
+// refusals, and the choice among several challenges.
+
+use std.test
+use digchallenge
+use digerr
+
+fn fault_of(v: Str) -> Str
+    match digchallenge.parse(v)
+        Ok(_)  => "ok"
+        Err(e) => digerr.code_of(e)
+
+fn shown(v: Str) -> Str
+    match digchallenge.parse(v)
+        Ok(_)  => "ok"
+        Err(e) => e.message()
+
+// ── The grammar ─────────────────────────────────────────────────────
+
+@test
+fn test_a_challenge_is_read_in_any_letter_case_with_any_spacing()
+    match digchallenge.parse("  DIGEST   REALM = \"r\" ,nonce=\"n\" ,\tQOP=auth,stale=TRUE  ")
+        Err(e) => test.fail(e.message())
+        Ok(c)  =>
+            test.assert_eq(c.realm, "r")
+            test.assert_eq(c.nonce, "n")
+            test.assert(c.qop_auth)
+            test.assert(c.stale)
+            test.assert(not c.userhash)
+            test.assert(not c.algorithm_given)
+            test.assert_eq(c.algorithm, "MD5")
+            test.assert_eq(c.opaque, "")
+
+@test
+fn test_a_quoted_value_may_hold_commas_equals_signs_and_escaped_quotes()
+    match digchallenge.parse("Digest realm=\"a, b=c \\\"d\\\" \\\\ e\", nonce=\"n\"")
+        Err(e) => test.fail(e.message())
+        Ok(c)  => test.assert_eq(c.realm, "a, b=c \"d\" \\ e")
+
+@test
+fn test_an_unknown_parameter_is_skipped_and_the_later_ones_still_read()
+    match digchallenge.parse("Digest realm=\"r\", domain=\"/a /b\", charset=UTF-8, nonce=\"n\", opaque=\"o\"")
+        Err(e) => test.fail(e.message())
+        Ok(c)  =>
+            test.assert_eq(c.nonce, "n")
+            test.assert_eq(c.opaque, "o")
+
+@test
+fn test_the_qop_list_is_read_token_by_token()
+    match digchallenge.parse("Digest realm=\"r\", nonce=\"n\", qop=\" Auth-Int , auth , x \"")
+        Err(e) => test.fail(e.message())
+        Ok(c)  =>
+            test.assert(c.qop_auth)
+            test.assert(c.qop_auth_int)
+            test.assert(c.qop_given)
+    match digchallenge.parse("Digest realm=\"r\", nonce=\"n\", qop=\"auth-int\"")
+        Err(e) => test.fail(e.message())
+        Ok(c)  =>
+            test.assert(not c.qop_auth)
+            test.assert(c.qop_auth_int)
+
+// ── Refusals ────────────────────────────────────────────────────────
+
+@test
+fn test_a_value_that_is_not_a_digest_challenge_is_refused()
+    test.assert_eq(fault_of("Basic realm=\"r\""), "not-digest")
+    test.assert_eq(fault_of(""), "not-digest")
+    test.assert_eq(fault_of("Dig"), "not-digest")
+    test.assert_eq(fault_of("Digestive realm=\"r\", nonce=\"n\""), "not-digest")
+    test.assert_eq(shown("Basic"), "the header value is not a Digest challenge")
+
+@test
+fn test_realm_and_nonce_are_required_and_named()
+    test.assert_eq(shown("Digest nonce=\"n\""), "the challenge has no `realm` parameter")
+    test.assert_eq(shown("Digest realm=\"r\""), "the challenge has no `nonce` parameter")
+    test.assert_eq(fault_of("Digest"), "missing")
+    test.assert_eq(fault_of("Digest realm=\"\", nonce=\"\""), "ok")
+
+@test
+fn test_a_challenge_that_is_not_a_parameter_list_is_refused_with_the_byte_it_stopped_at()
+    test.assert_eq(shown("Digest realm"), "the challenge is not a list of parameters, at byte 7")
+    test.assert_eq(fault_of("Digest realm=\"unterminated"), "bad-syntax")
+    test.assert_eq(shown("Digest =x, realm=\"r\", nonce=\"n\""),
+        "the challenge is not a list of parameters, at byte 7")
+    test.assert_eq(fault_of("Digest a b=c"), "bad-syntax")
+    test.assert_eq(fault_of("Digest realm=\"r\\"), "bad-syntax")
+
+@test
+fn test_an_algorithm_the_package_does_not_implement_is_named()
+    test.assert_eq(shown("Digest realm=\"r\", nonce=\"n\", algorithm=SHA-512-256"),
+        "the algorithm `SHA-512-256` is not supported")
+    test.assert_eq(fault_of("Digest realm=\"r\", nonce=\"n\", algorithm=SHA-1"), "unsupported-algorithm")
+    test.assert_eq(fault_of("Digest realm=\"r\", nonce=\"n\", algorithm=md5-SESS"), "ok")
+
+@test
+fn test_a_qop_with_nothing_this_package_answers_is_refused()
+    test.assert_eq(shown("Digest realm=\"r\", nonce=\"n\", qop=\"x, y\""),
+        "no supported quality of protection in `x, y`")
+    test.assert_eq(fault_of("Digest realm=\"r\", nonce=\"n\", qop=\"\""), "unsupported-qop")
+
+// ── Several challenges ──────────────────────────────────────────────
+
+@test
+fn test_the_strongest_algorithm_among_several_challenges_is_taken()
+    let md5 = "Digest realm=\"r\", nonce=\"1\""
+    let sha = "Digest realm=\"r\", nonce=\"2\", algorithm=SHA-256"
+    let sess = "Digest realm=\"r\", nonce=\"3\", algorithm=SHA-256-sess"
+    match digchallenge.best_of([md5, sha])
+        Err(e) => test.fail(e.message())
+        Ok(c)  => test.assert_eq(c.nonce, "2")
+    match digchallenge.best_of([sha, md5])
+        Err(e) => test.fail(e.message())
+        Ok(c)  => test.assert_eq(c.nonce, "2")
+    match digchallenge.best_of([sha, sess])
+        Err(e) => test.fail(e.message())
+        Ok(c)  => test.assert_eq(c.nonce, "2")
+    match digchallenge.best_of([md5, "Basic realm=\"r\"", "Digest realm=\"r\", nonce=\"4\", algorithm=SHA-512-256"])
+        Err(e) => test.fail(e.message())
+        Ok(c)  => test.assert_eq(c.nonce, "1")
+
+@test
+fn test_with_no_challenge_to_answer_the_fault_says_so()
+    match digchallenge.best_of([])
+        Ok(_)  => test.fail("nothing to answer")
+        Err(e) =>
+            test.assert_eq(digerr.code_of(e), "no-challenge")
+            test.assert_eq(e.message(), "there is no Digest challenge to answer")
+    match digchallenge.best_of(["Basic realm=\"r\"", "Negotiate"])
+        Ok(_)  => test.fail("no digest among them")
+        Err(e) => test.assert_eq(digerr.code_of(e), "no-challenge")

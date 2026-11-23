@@ -1,0 +1,224 @@
+// digchallenge — the `WWW-Authenticate: Digest` header value, read.
+//
+// RFC 7616 section 3.3 defines the challenge as the scheme `Digest` and
+// a comma-separated list of parameters, each a name, an equals sign and
+// a token or a quoted string.  A quoted string has a backslash before a
+// quote or a backslash inside it.
+//
+//   Digest realm="http-auth@example.org", qop="auth, auth-int",
+//          algorithm=SHA-256, nonce="7ypf/...", opaque="FQhe/..."
+//
+// A server may send one challenge per algorithm, as several header
+// lines, to let the client take the one it supports.  `best_of` reads
+// them and keeps the strongest this package can answer.
+
+use std.str
+use digerr
+
+// A challenge, with the parameters this package answers.
+//
+// ```novo
+// use digchallenge
+//
+// fn main() [io]
+//     match digchallenge.parse("Digest realm=\"r\", nonce=\"n\", algorithm=SHA-256")
+//         Err(e) => println(e.message())
+//         Ok(c)  => println("${c.realm} ${c.algorithm}")   // r SHA-256
+// ```
+pub struct DigestChallenge
+    // The protection space, shown to a person when asking for a password
+    // and hashed into the answer.
+    realm: Str
+    // The server's nonce.
+    nonce: Str
+    // The server's opaque string, which the client returns unchanged, or
+    // empty when the server sent none.
+    opaque: Str
+    // `MD5`, `MD5-sess`, `SHA-256` or `SHA-256-sess`, in that spelling.
+    algorithm: Str
+    // Whether the challenge named an algorithm.  RFC 2069 and RFC 2617
+    // servers do not, and the answer then leaves it out too.
+    algorithm_given: Bool
+    // Whether the server offers `qop=auth`.
+    qop_auth: Bool
+    // Whether the server offers `qop=auth-int`.
+    qop_auth_int: Bool
+    // Whether the server sent any `qop`.  A challenge with none is
+    // answered in the form of RFC 2069.
+    qop_given: Bool
+    // Whether the nonce is stale: the credentials were right and the
+    // client should retry with the new nonce.
+    stale: Bool
+    // Whether the client must send a hash of the user name in place of
+    // the name (RFC 7616 section 3.4.4).
+    userhash: Bool
+
+// The parameters of a challenge as parallel lists of names, in lower
+// case, and values.
+struct Params
+    names: [Str]
+    values: [Str]
+
+// The value of a parameter, or `None`.
+fn lookup(p: Params, name: Str) -> ?Str
+    var found: ?Str = None
+    for i in 0..list.len(p.names)
+        if p.names[i] == name and found == None
+            found = Some(p.values[i])
+    found
+
+// Whether a byte is white space.
+fn is_blank(b: Int) -> Bool
+    b == ' ' or b == 9
+
+// The parameter list that starts at byte `from` of `s`.
+fn read_params(s: Str, from: Int) -> Result<Params, digerr.DigestFault>
+    var names: [Str] = []
+    var values: [Str] = []
+    let n = str.len(s)
+    var i = from
+    while i < n
+        let c = str.byte_at_or(s, i, 0)
+        if is_blank(c) or c == ','
+            i += 1
+        else
+            let eq = str.index_from(s, "=", i) ?? -1
+            if eq < 0
+                return Err(digerr.DigestBadSyntax(i))
+            let name = str.lower(str.trim(str.slice(s, i, eq)))
+            if str.len(name) == 0 or str.contains(name, " ") or str.contains(name, ",")
+                return Err(digerr.DigestBadSyntax(i))
+            i = eq + 1
+            while i < n and is_blank(str.byte_at_or(s, i, 0))
+                i += 1
+            var value = ""
+            if str.byte_at_or(s, i, 0) == '"'
+                i += 1
+                var closed = false
+                while not closed
+                    if i >= n
+                        return Err(digerr.DigestBadSyntax(i))
+                    let d = str.byte_at_or(s, i, 0)
+                    if d == '"'
+                        closed = true
+                    elif d == 92 and i + 1 < n
+                        value = value + str.slice(s, i + 1, i + 2)
+                        i += 1
+                    else
+                        value = value + str.slice(s, i, i + 1)
+                    i += 1
+            else
+                let start = i
+                while i < n and str.byte_at_or(s, i, 0) != ',' and not is_blank(str.byte_at_or(s, i, 0))
+                    i += 1
+                value = str.slice(s, start, i)
+            list.push(names, name)
+            list.push(values, value)
+    Ok(Params { names: names, values: values })
+
+// The algorithm in its canonical spelling, or `None` for one this
+// package does not implement.
+fn canonical_algorithm(name: Str) -> ?Str
+    match str.lower(name)
+        "md5"          => Some("MD5")
+        "md5-sess"     => Some("MD5-sess")
+        "sha-256"      => Some("SHA-256")
+        "sha-256-sess" => Some("SHA-256-sess")
+        _              => None
+
+// The challenge in a `WWW-Authenticate` header value.
+//
+// The scheme is `Digest` in any letter case.  Parameter names are read
+// in any letter case, and an unknown parameter is skipped.  `realm` and
+// `nonce` are required.  An unsupported algorithm is a fault that names
+// it, and so is a `qop` with no value this package answers.
+//
+// ```novo
+// use digchallenge
+//
+// fn main() [io]
+//     match digchallenge.parse("digest realm=\"a\", nonce=\"b\", qop=\"auth, auth-int\"")
+//         Err(e) => println(e.message())
+//         Ok(c)  => println("${c.qop_auth} ${c.qop_auth_int}")   // true true
+// ```
+pub fn parse(value: Str) -> Result<DigestChallenge, digerr.DigestFault> []
+    let text = str.trim(value)
+    if str.len(text) < 6 or str.lower(str.slice(text, 0, 6)) != "digest"
+        return Err(digerr.DigestNotDigest)
+    if str.len(text) > 6 and not is_blank(str.byte_at_or(text, 6, 0))
+        return Err(digerr.DigestNotDigest)
+    let p = read_params(text, 6)!
+    let realm = lookup(p, "realm") ?? ""
+    if lookup(p, "realm") == None
+        return Err(digerr.DigestMissing("realm"))
+    let nonce = lookup(p, "nonce") ?? ""
+    if lookup(p, "nonce") == None
+        return Err(digerr.DigestMissing("nonce"))
+    let named = lookup(p, "algorithm")
+    let algorithm = canonical_algorithm(named ?? "MD5")
+    if algorithm == None
+        return Err(digerr.DigestUnsupportedAlgorithm(named ?? ""))
+    var qop_auth = false
+    var qop_auth_int = false
+    let offered = lookup(p, "qop")
+    for token in str.split(offered ?? "", ",")
+        let t = str.lower(str.trim(token))
+        if t == "auth"
+            qop_auth = true
+        elif t == "auth-int"
+            qop_auth_int = true
+    if offered != None and not qop_auth and not qop_auth_int
+        return Err(digerr.DigestUnsupportedQop(offered ?? ""))
+    Ok(DigestChallenge {
+        realm: realm,
+        nonce: nonce,
+        opaque: lookup(p, "opaque") ?? "",
+        algorithm: algorithm ?? "MD5",
+        algorithm_given: named != None,
+        qop_auth: qop_auth,
+        qop_auth_int: qop_auth_int,
+        qop_given: offered != None,
+        stale: str.lower(lookup(p, "stale") ?? "") == "true",
+        userhash: str.lower(lookup(p, "userhash") ?? "") == "true" })
+
+// How strong an algorithm is, for choosing among challenges.
+fn rank(c: DigestChallenge) -> Int
+    if str.starts_with(c.algorithm, "SHA-256")
+        2
+    else
+        1
+
+// The challenge to answer among several header values.
+//
+// A server that supports several algorithms sends one `Digest`
+// challenge for each, in preference order, as separate header lines.
+// Values that are not `Digest` challenges, and challenges this package
+// cannot answer, are skipped.  Of the rest the one with the strongest
+// algorithm is taken, SHA-256 before MD5; for equal strength the first
+// one stands.  If none is left the fault is `DigestNoChallenge`.
+//
+// ```novo
+// use digchallenge
+//
+// fn main() [io]
+//     let md5 = "Digest realm=\"r\", nonce=\"1\""
+//     let sha = "Digest realm=\"r\", nonce=\"2\", algorithm=SHA-256"
+//     match digchallenge.best_of([md5, "Basic realm=\"r\"", sha])
+//         Err(e) => println(e.message())
+//         Ok(c)  => println("${c.algorithm}")   // SHA-256
+// ```
+pub fn best_of(values: [Str]) -> Result<DigestChallenge, digerr.DigestFault> []
+    var best: ?DigestChallenge = None
+    for v in values
+        match parse(v)
+            Err(_) => ()
+            Ok(c)  =>
+                match best
+                    None    =>
+                        best = Some(c)
+                    Some(b) =>
+                        if rank(c) > rank(b)
+                            best = Some(c)
+    match best
+        None    => Err(digerr.DigestNoChallenge)
+        Some(b) => Ok(b)

@@ -1,0 +1,56 @@
+// digerr — what the reader of a challenge and the writer of a response
+// refuse.
+
+// Why a challenge was refused.
+//
+// ```novo
+// use digerr
+//
+// fn main() [io]
+//     println(digerr.code_of(DigestNotDigest))   // not-digest
+// ```
+pub enum DigestFault
+    // The header value is not a `Digest` challenge: it names another
+    // scheme or no scheme.
+    DigestNotDigest
+    // The challenge lacks a parameter RFC 7616 section 3.3 requires.
+    DigestMissing(param: Str)
+    // The challenge is not a list of `name=value` parameters; the byte
+    // offset is where reading stopped.
+    DigestBadSyntax(at: Int)
+    // The algorithm is not MD5 or SHA-256, or the -sess form of one.
+    DigestUnsupportedAlgorithm(name: Str)
+    // The challenge offers `qop` and none of the values is `auth` or
+    // `auth-int`.
+    DigestUnsupportedQop(offered: Str)
+    // None of the header values offered holds a Digest challenge this
+    // package can answer.
+    DigestNoChallenge
+
+impl Error for DigestFault
+    // The one-line report.
+    fn message(self) -> Str
+        match self
+            DigestNotDigest                  => "the header value is not a Digest challenge"
+            DigestMissing(p)                 => "the challenge has no `${p}` parameter"
+            DigestBadSyntax(at)              => "the challenge is not a list of parameters, at byte ${at}"
+            DigestUnsupportedAlgorithm(name) => "the algorithm `${name}` is not supported"
+            DigestUnsupportedQop(offered)    => "no supported quality of protection in `${offered}`"
+            DigestNoChallenge                => "there is no Digest challenge to answer"
+
+// A short stable name for the kind of fault.
+//
+// ```novo
+// use digerr
+//
+// fn main() [io]
+//     println(digerr.code_of(DigestMissing("nonce")))   // missing
+// ```
+pub fn code_of(f: DigestFault) -> Str []
+    match f
+        DigestNotDigest               => "not-digest"
+        DigestMissing(_)              => "missing"
+        DigestBadSyntax(_)            => "bad-syntax"
+        DigestUnsupportedAlgorithm(_) => "unsupported-algorithm"
+        DigestUnsupportedQop(_)       => "unsupported-qop"
+        DigestNoChallenge             => "no-challenge"

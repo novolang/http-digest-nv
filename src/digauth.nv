@@ -1,0 +1,179 @@
+// digauth — the `Authorization: Digest` header that answers a challenge.
+//
+// RFC 7616 section 3.4.1 defines the response.  With H the hash of the
+// challenge's algorithm, a hash written as lower-case hexadecimal:
+//
+//   HA1 = H(username ":" realm ":" password)
+//         for an algorithm ending in `-sess`:
+//         H(H(username ":" realm ":" password) ":" nonce ":" cnonce)
+//   HA2 = H(method ":" uri)                     for qop=auth
+//         H(method ":" uri ":" H(entity-body))  for qop=auth-int
+//   response = H(HA1 ":" nonce ":" nc ":" cnonce ":" qop ":" HA2)
+//
+// A challenge with no `qop` is answered in the form of RFC 2069
+// section 2.1.2, where the response is `H(HA1 ":" nonce ":" HA2)` and
+// the header carries no `nc` and no `cnonce`.
+//
+// The client nonce and the request counter are parameters: this package
+// reads no random source and keeps no state.  A caller makes a client
+// nonce from random bytes, and counts requests it sends under one server
+// nonce, from 1.
+
+use std.bytes
+use std.str
+use digchallenge
+use hashing
+
+// What the answer is computed from: the credentials, the request and the
+// client's side of the exchange.
+//
+// ```novo
+// use std.bytes
+// use digauth
+//
+// fn main() [io]
+//     let r = DigestRequest { username: "u", password: "p", method: "GET", uri: "/", cnonce: "c", nc: 1, body: bytes.zeros(0) }
+//     println("${r.method} ${r.uri}")   // GET /
+// ```
+pub struct DigestRequest
+    // The user name.
+    username: Str
+    // The password.
+    password: Str
+    // The request method, in capitals.
+    method: Str
+    // The request target exactly as it is sent in the request line,
+    // including the query.
+    uri: Str
+    // The client nonce.  It is sent in the header, so it holds no
+    // quote and no backslash worth escaping; hexadecimal from random
+    // bytes is the usual choice.
+    cnonce: Str
+    // How many requests have been sent under the server's nonce,
+    // this one included, from 1.
+    nc: Int
+    // The request body, hashed for `qop=auth-int` and ignored otherwise.
+    body: Bytes
+
+// The hash of a text, as lower-case hexadecimal, under an algorithm of
+// the challenge.
+fn hex_hash(algorithm: Str, text: Str) -> Str
+    hex_hash_bytes(algorithm, bytes.from_str(text))
+
+// The hash of a byte string, as lower-case hexadecimal.
+fn hex_hash_bytes(algorithm: Str, data: Bytes) -> Str
+    if str.starts_with(algorithm, "SHA-256")
+        bytes.to_hex(hashing.sha256(data))
+    else
+        bytes.to_hex(hashing.md5(data))
+
+// The quality of protection the answer uses: `auth` if the server
+// offers it, else `auth-int`, else the empty string.
+fn qop_for(c: digchallenge.DigestChallenge) -> Str
+    if c.qop_auth
+        "auth"
+    elif c.qop_auth_int
+        "auth-int"
+    else
+        ""
+
+// The eight-digit lower-case hexadecimal spelling of a request count.
+//
+// ```novo
+// use digauth
+//
+// fn main() [io]
+//     println(digauth.nc_text(255))   // 000000ff
+// ```
+pub fn nc_text(nc: Int) -> Str []
+    var out = ""
+    for k in 0..8
+        let nibble = (nc >>> (28 - 4 * k)) & 15
+        out = out + str.slice("0123456789abcdef", nibble, nibble + 1)
+    out
+
+// HA1 of RFC 7616 section 3.4.2.
+fn ha1(c: digchallenge.DigestChallenge, r: DigestRequest) -> Str
+    let base = hex_hash(c.algorithm, r.username + ":" + c.realm + ":" + r.password)
+    if str.ends_with(c.algorithm, "-sess")
+        hex_hash(c.algorithm, base + ":" + c.nonce + ":" + r.cnonce)
+    else
+        base
+
+// HA2 of RFC 7616 section 3.4.3.
+fn ha2(c: digchallenge.DigestChallenge, r: DigestRequest, qop: Str) -> Str
+    if qop == "auth-int"
+        hex_hash(c.algorithm, r.method + ":" + r.uri + ":" + hex_hash_bytes(c.algorithm, r.body))
+    else
+        hex_hash(c.algorithm, r.method + ":" + r.uri)
+
+// The response value, as lower-case hexadecimal, for a challenge and a
+// request: the `response` parameter of the header.
+//
+// ```novo
+// use std.bytes
+// use digauth
+// use digchallenge
+//
+// fn main() [io]
+//     let c = digchallenge.parse("Digest realm=\"testrealm@host.com\", qop=\"auth,auth-int\", nonce=\"dcd98b7102dd2f0e8b11d0f600bfb0c093\"")!
+//     let r = DigestRequest { username: "Mufasa", password: "Circle Of Life", method: "GET", uri: "/dir/index.html", cnonce: "0a4f113b", nc: 1, body: bytes.zeros(0) }
+//     println(digauth.response_of(c, r))   // 6629fae49393a05397450978507c4ef1
+// ```
+pub fn response_of(c: digchallenge.DigestChallenge, r: DigestRequest) -> Str []
+    let qop = qop_for(c)
+    let a1 = ha1(c, r)
+    let a2 = ha2(c, r, qop)
+    if str.len(qop) == 0
+        hex_hash(c.algorithm, a1 + ":" + c.nonce + ":" + a2)
+    else
+        hex_hash(c.algorithm,
+            a1 + ":" + c.nonce + ":" + nc_text(r.nc) + ":" + r.cnonce + ":" + qop + ":" + a2)
+
+// A text between quotes, with a backslash before each quote and
+// backslash in it.
+//
+// ```novo
+// use digauth
+//
+// fn main() [io]
+//     println(digauth.quote("a\"b"))   // "a\"b"
+// ```
+pub fn quote(s: Str) -> Str []
+    "\"" + str.replace(str.replace(s, "\\", "\\\\"), "\"", "\\\"") + "\""
+
+// The value of the `Authorization` header that answers the challenge.
+//
+// The parameters are in the order RFC 7616 section 3.9.1 shows them:
+// `username`, `realm`, `nonce`, `uri`, `algorithm` when the challenge
+// named one, `response`, `opaque` when the challenge sent one, then
+// `qop`, `nc` and `cnonce` when the challenge offered a `qop`, and
+// `userhash=true` when it asked for a hashed user name.
+//
+// ```novo
+// use std.bytes
+// use digauth
+// use digchallenge
+//
+// fn main() [io]
+//     let c = digchallenge.parse("Digest realm=\"r\", nonce=\"n\"")!
+//     let r = DigestRequest { username: "u", password: "p", method: "GET", uri: "/", cnonce: "c", nc: 1, body: bytes.zeros(0) }
+//     println(digauth.authorization(c, r))
+//     // Digest username="u", realm="r", nonce="n", uri="/", response="f23121ca97143c6b358da620220c83b4"
+// ```
+pub fn authorization(c: digchallenge.DigestChallenge, r: DigestRequest) -> Str []
+    let qop = qop_for(c)
+    var user = r.username
+    if c.userhash
+        user = hex_hash(c.algorithm, r.username + ":" + c.realm)
+    var out = "Digest username=" + quote(user) + ", realm=" + quote(c.realm) + ", nonce=" + quote(c.nonce) + ", uri=" + quote(r.uri)
+    if c.algorithm_given
+        out = out + ", algorithm=" + c.algorithm
+    out = out + ", response=\"" + response_of(c, r) + "\""
+    if str.len(c.opaque) > 0
+        out = out + ", opaque=" + quote(c.opaque)
+    if str.len(qop) > 0
+        out = out + ", qop=" + qop + ", nc=" + nc_text(r.nc) + ", cnonce=" + quote(r.cnonce)
+    if c.userhash
+        out = out + ", userhash=true"
+    out

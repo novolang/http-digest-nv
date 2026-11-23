@@ -1,0 +1,190 @@
+// digest_tests — the answers of RFC 7616 section 3.9.1 and RFC 2617
+// section 3.5, and the forms those two examples do not reach.
+//
+// The three published response values below are the RFC's own: MD5 and
+// SHA-256 for the user Mufasa of RFC 7616, and the MD5 response of the
+// RFC 2617 example.  The values for the -sess forms, `auth-int`, the
+// RFC 2069 form and a hashed user name were computed with Python's
+// hashlib from the formulas of RFC 7616 section 3.4, apart from this
+// package.
+
+use std.test
+use std.bytes
+use std.str
+use digauth
+use digchallenge
+
+// RFC 7616 section 3.9.1's challenges: the same server offers MD5 and
+// SHA-256.
+fn md5_challenge() -> Str
+    "Digest realm=\"http-auth@example.org\", qop=\"auth, auth-int\", algorithm=MD5, nonce=\"7ypf/xlj9XXwfDPEoM4URrv/xwf94BcCAzFZH4GiTo0v\", opaque=\"FQhe/qaU925kfnzjCev0ciny7QMkPqMAFRtzCUYo5tdS\""
+
+fn sha256_challenge() -> Str
+    "Digest realm=\"http-auth@example.org\", qop=\"auth, auth-int\", algorithm=SHA-256, nonce=\"7ypf/xlj9XXwfDPEoM4URrv/xwf94BcCAzFZH4GiTo0v\", opaque=\"FQhe/qaU925kfnzjCev0ciny7QMkPqMAFRtzCUYo5tdS\""
+
+fn challenge_of(v: Str) -> digchallenge.DigestChallenge
+    match digchallenge.parse(v)
+        Ok(c)  => c
+        Err(e) =>
+            test.fail(e.message())
+            digchallenge.parse("Digest realm=\"x\", nonce=\"y\"")!
+
+fn mufasa(uri: Str, nc: Int, body: Bytes) -> digauth.DigestRequest
+    digauth.DigestRequest { username: "Mufasa",
+        password: "Circle of Life",
+        method: "GET",
+        uri: uri,
+        cnonce: "f2/wE4q74E6zIJEtWaHKaf5wv/H5QzzpXusqGemxURZJ",
+        nc: nc,
+        body: body }
+
+// The value of one parameter of an Authorization header, quoted or not.
+fn param_of(header: Str, name: Str) -> Str
+    for part in str.split(str.slice(header, 7, str.len(header)), ", ")
+        if str.starts_with(part, name + "=")
+            return str.replace(str.slice(part, str.len(name) + 1, str.len(part)), "\"", "")
+    "(absent)"
+
+// ── The RFC's own examples ──────────────────────────────────────────
+
+@test
+fn test_rfc_7616_md5_example_gives_the_published_response()
+    let c = challenge_of(md5_challenge())
+    test.assert_eq(digauth.response_of(c, mufasa("/dir/index.html", 1, bytes.zeros(0))),
+        "8ca523f5e9506fed4657c9700eebdbec")
+
+@test
+fn test_rfc_7616_sha256_example_gives_the_published_response()
+    let c = challenge_of(sha256_challenge())
+    test.assert_eq(digauth.response_of(c, mufasa("/dir/index.html", 1, bytes.zeros(0))),
+        "753927fa0e85d155564e2e272a28d1802ca10daf4496794697cf8db5856cb6c1")
+
+@test
+fn test_the_header_carries_the_parameters_the_rfc_example_shows()
+    let c = challenge_of(md5_challenge())
+    let h = digauth.authorization(c, mufasa("/dir/index.html", 1, bytes.zeros(0)))
+    test.assert(str.starts_with(h, "Digest "))
+    test.assert_eq(param_of(h, "username"), "Mufasa")
+    test.assert_eq(param_of(h, "realm"), "http-auth@example.org")
+    test.assert_eq(param_of(h, "uri"), "/dir/index.html")
+    test.assert_eq(param_of(h, "algorithm"), "MD5")
+    test.assert_eq(param_of(h, "nonce"), "7ypf/xlj9XXwfDPEoM4URrv/xwf94BcCAzFZH4GiTo0v")
+    test.assert_eq(param_of(h, "nc"), "00000001")
+    test.assert_eq(param_of(h, "cnonce"), "f2/wE4q74E6zIJEtWaHKaf5wv/H5QzzpXusqGemxURZJ")
+    test.assert_eq(param_of(h, "qop"), "auth")
+    test.assert_eq(param_of(h, "response"), "8ca523f5e9506fed4657c9700eebdbec")
+    test.assert_eq(param_of(h, "opaque"), "FQhe/qaU925kfnzjCev0ciny7QMkPqMAFRtzCUYo5tdS")
+
+@test
+fn test_the_header_is_written_in_one_fixed_order()
+    let c = challenge_of(sha256_challenge())
+    test.assert_eq_str(digauth.authorization(c, mufasa("/dir/index.html", 1, bytes.zeros(0))),
+        "Digest username=\"Mufasa\", realm=\"http-auth@example.org\", nonce=\"7ypf/xlj9XXwfDPEoM4URrv/xwf94BcCAzFZH4GiTo0v\", uri=\"/dir/index.html\", algorithm=SHA-256, response=\"753927fa0e85d155564e2e272a28d1802ca10daf4496794697cf8db5856cb6c1\", opaque=\"FQhe/qaU925kfnzjCev0ciny7QMkPqMAFRtzCUYo5tdS\", qop=auth, nc=00000001, cnonce=\"f2/wE4q74E6zIJEtWaHKaf5wv/H5QzzpXusqGemxURZJ\"")
+
+@test
+fn test_rfc_2617_example_without_an_algorithm_gives_the_published_response()
+    let c = challenge_of("Digest realm=\"testrealm@host.com\", qop=\"auth,auth-int\", nonce=\"dcd98b7102dd2f0e8b11d0f600bfb0c093\", opaque=\"5ccc069c403ebaf9f0171e9517f40e41\"")
+    let r = digauth.DigestRequest { username: "Mufasa",
+        password: "Circle Of Life",
+        method: "GET",
+        uri: "/dir/index.html",
+        cnonce: "0a4f113b",
+        nc: 1,
+        body: bytes.zeros(0) }
+    test.assert_eq(digauth.response_of(c, r), "6629fae49393a05397450978507c4ef1")
+    let h = digauth.authorization(c, r)
+    test.assert_eq(param_of(h, "algorithm"), "(absent)")
+    test.assert_eq(param_of(h, "nc"), "00000001")
+    test.assert_eq(param_of(h, "opaque"), "5ccc069c403ebaf9f0171e9517f40e41")
+
+// ── The forms the examples do not reach ─────────────────────────────
+
+@test
+fn test_the_sess_forms_hash_the_nonces_into_the_first_digest()
+    let md5 = challenge_of("Digest realm=\"http-auth@example.org\", qop=\"auth\", algorithm=MD5-sess, nonce=\"7ypf/xlj9XXwfDPEoM4URrv/xwf94BcCAzFZH4GiTo0v\"")
+    test.assert_eq(digauth.response_of(md5, mufasa("/dir/index.html", 1, bytes.zeros(0))),
+        "e783283f46242139c486a698fec7211d")
+    let sha = challenge_of("Digest realm=\"http-auth@example.org\", qop=\"auth\", algorithm=sha-256-SESS, nonce=\"7ypf/xlj9XXwfDPEoM4URrv/xwf94BcCAzFZH4GiTo0v\"")
+    test.assert_eq(sha.algorithm, "SHA-256-sess")
+    test.assert_eq(digauth.response_of(sha, mufasa("/dir/index.html", 1, bytes.zeros(0))),
+        "2fd51b3a77ad75bad6afad6003e818d767133c46d9e2749e7f5232ae1ea3efd7")
+
+@test
+fn test_auth_int_hashes_the_request_body_into_the_second_digest()
+    let body = bytes.from_str("name=Mufasa&x=") + hexb("00ff")
+    let md5 = challenge_of("Digest realm=\"http-auth@example.org\", qop=\"auth-int\", algorithm=MD5, nonce=\"7ypf/xlj9XXwfDPEoM4URrv/xwf94BcCAzFZH4GiTo0v\"")
+    var r = mufasa("/upload", 10, body)
+    r = digauth.DigestRequest { username: r.username,
+        password: r.password,
+        method: "POST",
+        uri: "/upload",
+        cnonce: r.cnonce,
+        nc: 10,
+        body: body }
+    test.assert_eq(digauth.response_of(md5, r), "0634e9d542804a3ce177935319a4f89c")
+    test.assert_eq(param_of(digauth.authorization(md5, r), "qop"), "auth-int")
+    test.assert_eq(param_of(digauth.authorization(md5, r), "nc"), "0000000a")
+    let sha = challenge_of("Digest realm=\"http-auth@example.org\", qop=\"auth-int\", algorithm=SHA-256, nonce=\"7ypf/xlj9XXwfDPEoM4URrv/xwf94BcCAzFZH4GiTo0v\"")
+    test.assert_eq(digauth.response_of(sha, r),
+        "edfe687580b201d807391a3524cc56e44b5ee590e241456d9511f179907c57d1")
+
+fn hexb(h: Str) -> Bytes
+    bytes.from_hex(h) ?? bytes.zeros(0)
+
+@test
+fn test_auth_is_taken_when_both_are_offered()
+    let c = challenge_of(md5_challenge())
+    test.assert(c.qop_auth)
+    test.assert(c.qop_auth_int)
+    test.assert_eq(param_of(digauth.authorization(c, mufasa("/", 1, bytes.zeros(0))), "qop"), "auth")
+
+@test
+fn test_a_challenge_with_no_qop_is_answered_in_the_form_of_rfc_2069()
+    let c = challenge_of("Digest realm=\"r\", nonce=\"n\"")
+    let r = digauth.DigestRequest { username: "u",
+        password: "p",
+        method: "GET",
+        uri: "/",
+        cnonce: "c",
+        nc: 1,
+        body: bytes.zeros(0) }
+    test.assert(not c.qop_given)
+    test.assert_eq(digauth.response_of(c, r), "f23121ca97143c6b358da620220c83b4")
+    test.assert_eq_str(digauth.authorization(c, r),
+        "Digest username=\"u\", realm=\"r\", nonce=\"n\", uri=\"/\", response=\"f23121ca97143c6b358da620220c83b4\"")
+    let s = challenge_of("Digest realm=\"http-auth@example.org\", algorithm=SHA-256, nonce=\"7ypf/xlj9XXwfDPEoM4URrv/xwf94BcCAzFZH4GiTo0v\"")
+    test.assert_eq(digauth.response_of(s, mufasa("/dir/index.html", 1, bytes.zeros(0))),
+        "a1306b0595a6c7fe96c448631fb5cfbd5107bd1fe1da729d978dd7446b812363")
+
+@test
+fn test_a_hashed_user_name_is_sent_in_place_of_the_name()
+    let c = challenge_of("Digest realm=\"http-auth@example.org\", qop=\"auth\", algorithm=SHA-256, userhash=true, nonce=\"7ypf/xlj9XXwfDPEoM4URrv/xwf94BcCAzFZH4GiTo0v\"")
+    test.assert(c.userhash)
+    let h = digauth.authorization(c, mufasa("/dir/index.html", 1, bytes.zeros(0)))
+    test.assert_eq(param_of(h, "username"), "a947aad205e80e429958a387394944c6b496301e79f89d35a4cc23b6ee12b5b6")
+    test.assert_eq(param_of(h, "userhash"), "true")
+    // The password digest still uses the plain name, so the response is
+    // the one of the same request without the hashing.
+    let plain = challenge_of("Digest realm=\"http-auth@example.org\", qop=\"auth\", algorithm=SHA-256, nonce=\"7ypf/xlj9XXwfDPEoM4URrv/xwf94BcCAzFZH4GiTo0v\"")
+    test.assert_eq(param_of(h, "response"),
+        digauth.response_of(plain, mufasa("/dir/index.html", 1, bytes.zeros(0))))
+
+@test
+fn test_a_user_name_with_a_quote_or_a_backslash_is_escaped()
+    let c = challenge_of("Digest realm=\"r\", nonce=\"n\"")
+    let r = digauth.DigestRequest { username: "a\"b\\c",
+        password: "p",
+        method: "GET",
+        uri: "/",
+        cnonce: "c",
+        nc: 1,
+        body: bytes.zeros(0) }
+    test.assert(str.contains(digauth.authorization(c, r), "username=\"a\\\"b\\\\c\""))
+    test.assert_eq(digauth.quote("x"), "\"x\"")
+
+@test
+fn test_the_request_count_is_eight_hexadecimal_digits()
+    test.assert_eq(digauth.nc_text(1), "00000001")
+    test.assert_eq(digauth.nc_text(255), "000000ff")
+    test.assert_eq(digauth.nc_text(0), "00000000")
+    test.assert_eq(digauth.nc_text(4294967295), "ffffffff")
